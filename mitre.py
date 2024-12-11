@@ -1,5 +1,6 @@
 import os
 import requests
+import sys
 from bs4 import BeautifulSoup
 from datetime import datetime
 
@@ -157,14 +158,17 @@ def save_analytics_to_files(technique_id, details, today_date):
     print(f"Analytics saved in folder: {category_folder}")
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Error: Technique ID not provided. Please pass the technique ID as a command-line argument.")
+        sys.exit(1)
+
+    technique_id = sys.argv[1]
     today_date = datetime.now().strftime("%Y-%m-%d")
-    technique_ids = input("Enter the technique IDs separated by spaces (e.g., 1059 1059.001 1059.002): ").strip().split()
-    for technique_id in technique_ids:
-        details = get_mitre_technique_details(technique_id)
-        if "error" in details:
-            print(f"Error for {technique_id}: {details['error']}")
+    details = get_mitre_technique_details(technique_id)
+    if "error" in details:
+        print(f"Error for {technique_id}: {details['error']}")
+    else:
+        if details["Analytics"]:
+            save_analytics_to_files(technique_id, details, today_date)
         else:
-            if details["Analytics"]:
-                save_analytics_to_files(technique_id, details, today_date)
-            else:
-                print(f"No Analytics Queries Found for {technique_id}")
+            print(f"No Analytics Queries Found for {technique_id}")
