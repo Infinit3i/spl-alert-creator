@@ -1,6 +1,6 @@
 
 <div align="center">
-  <img src="https://git.infinit3i.com/matthew/Hunt-AI/raw/commit/4c3b0654cd4c5b94e8659f2d18f86e01b579ba87/Assets/threat_hunter.jpeg" alt="Threat Hunter" width="600">
+  <img src="https://github.com/Infinit3i/spl-alert-creator/blob/d9d383bc2a4f42359007ba1557289630773fdc3c/static/images/python-detective.jpeg" alt="Python Detective" width="600">
 </div>
 
 python3 main_menu.py
