@@ -1,3 +1,5 @@
+# SPL ALERT CREATOR
+## BY: MATTHEW IVERSON 
 
 <div align="center">
   <img src="https://github.com/Infinit3i/spl-alert-creator/blob/d9d383bc2a4f42359007ba1557289630773fdc3c/static/images/python-detective.jpeg" alt="Python Detective" width="600">
