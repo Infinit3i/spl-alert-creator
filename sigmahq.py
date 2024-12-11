@@ -1,155 +1,180 @@
 import yaml
 import os
+import sys
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-def fetch_sigma_repo(github_url, local_dir):
-    """Clone or download the entire Sigma repository."""
-    command = f"git clone {github_url} {local_dir}" if not os.path.exists(local_dir) else f"git -C {local_dir} pull"
-    exit_code = os.system(command)
-    if exit_code == 0:
-        print(f"Sigma repository fetched and saved to {local_dir}")
+def fetch_mitre_details(technique_id, subtechnique_id=None):
+    """Fetch the MITRE details (technique name, category, sub-technique, etc.) from the MITRE ATT&CK website."""
+    # Determine the URL based on whether a sub-technique is provided
+    if subtechnique_id:
+        url = f"https://attack.mitre.org/techniques/{technique_id}/{subtechnique_id.split('.')[1]}/"
     else:
-        print(f"Failed to fetch Sigma repository. Command: {command}")
+        url = f"https://attack.mitre.org/techniques/{technique_id}/"
 
-def search_sigma_files(local_dir, mitre_code):
-    """Search all Sigma YAML files for a specific MITRE T-code."""
-    matching_files = []
-    t_code = f"T{mitre_code}"  # Ensure the input is formatted as T####
-
-    print(f"Starting to search for T-code {t_code} in all files under {local_dir}...")
-    for root, dirs, files in os.walk(local_dir):
-        print(f"Searching directory: {root}")
-        for file in files:
-            if file.endswith('.yml'):
-                file_path = os.path.join(root, file)
-                print(f"Examining file: {file_path}")
-                try:
-                    with open(file_path, 'r') as f:
-                        # Load all YAML documents in the file
-                        documents = yaml.safe_load_all(f)
-                        for doc in documents:
-                            if doc:  # Ensure document is not None
-                                tags = doc.get('tags', [])
-                                if any(tag.lower() == f"attack.{t_code.lower()}" for tag in tags):
-                                    print(f"Match found in file: {file_path}")
-                                    matching_files.append(file_path)
-                                    break
-                except yaml.YAMLError as e:
-                    print(f"Error parsing YAML file {file_path}: {e}")
-    print(f"Finished searching. Total matching files: {len(matching_files)}")
-    return list(set(matching_files))  # Remove duplicates
-
-def fetch_mitre_technique_name(technique_id):
-    """Fetch the MITRE technique name from the MITRE ATT&CK website."""
-    technique_id = technique_id.upper()
-    url = f"https://attack.mitre.org/techniques/{technique_id}/"
     try:
         response = requests.get(url)
         response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        h1_element = soup.find('h1')
-        if h1_element:
-            technique_name = h1_element.text.strip()
-            print(f"Fetched technique name: {technique_name} for ID: {technique_id}")
-            return technique_name
-        else:
-            print(f"Technique name not found in the page for ID: {technique_id}")
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Extract technique name
+        try:
+            raw_name = soup.find("h1", {"id": ""}).text.strip()
+            if ":" in raw_name:
+                technique_name, subtechnique_name = map(str.strip, raw_name.split(":", 1))
+            else:
+                technique_name = raw_name
+                subtechnique_name = ""
+        except AttributeError:
+            technique_name = "Unknown"
+            subtechnique_name = ""
+
+        # Extract category (tactic)
+        try:
+            tactic_section = soup.find("div", {"id": "card-tactics"})
+            if tactic_section:
+                tactic_link = tactic_section.find("a")
+                mitre_category = tactic_link.text.strip().replace(" ", "_") if tactic_link else "Unknown"
+            else:
+                mitre_category = "Unknown"
+        except AttributeError:
+            mitre_category = "Unknown"
+
+        return {
+            "technique_name": technique_name,
+            "mitre_category": mitre_category,
+            "subtechnique_name": subtechnique_name,
+        }
+
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching MITRE technique name for ID {technique_id}: {e}")
-    return f"Technique {technique_id}"
+        print(f"Error fetching MITRE details for ID {technique_id}: {e}")
+        return {
+            "technique_name": f"Technique {technique_id}",
+            "mitre_category": "Unknown",
+            "subtechnique_name": "",
+        }
 
-def sigma_to_splunk_search(sigma_data):
-    """Convert Sigma detection to a Splunk search query."""
-    detection = sigma_data.get('detection', {})
-    selection = detection.get('selection', {})
-    filters = [key for key in detection.keys() if key.startswith('filter_')]
-
-    # Process selection conditions
+def sigma_to_splunk_search(detection):
+    """Convert Sigma detection rules into a Splunk search query."""
     conditions = []
-    for key, value in selection.items():
-        if isinstance(value, str):
-            conditions.append(f"{key}='{value}'")
+    not_conditions = []
+
+    for key, value in detection.items():
+        if isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                if isinstance(sub_value, str):
+                    conditions.append(f'{sub_key}="{sub_value}"')
+                elif isinstance(sub_value, list):
+                    or_conditions = " OR ".join([f'{sub_key}="{v}"' for v in sub_value])
+                    conditions.append(f"({or_conditions})")
+        elif isinstance(value, str):
+            conditions.append(f'{key}="{value}"')
         elif isinstance(value, list):
-            or_conditions = " OR ".join([f"{key}='{v}'" for v in value])
+            or_conditions = " OR ".join([f'{key}="{v}"' for v in value])
             conditions.append(f"({or_conditions})")
 
-    # Process filters for NOT conditions
-    not_conditions = []
-    for filter_key in filters:
-        filter_values = detection[filter_key]
-        if isinstance(filter_values, dict):
-            for sub_key, sub_values in filter_values.items():
-                if isinstance(sub_values, str):
-                    not_conditions.append(f"{sub_key}='{sub_values}'")
-                elif isinstance(sub_values, list):
-                    or_conditions = " OR ".join([f"{sub_key}='{v}'" for v in sub_values])
-                    not_conditions.append(f"({or_conditions})")
+    condition_str = " AND ".join(conditions)
+    not_condition_str = " OR ".join(not_conditions)
+    
+    if not_condition_str:
+        return f"({condition_str}) AND NOT ({not_condition_str})"
+    return condition_str
 
-    selection_condition = " AND ".join(conditions)
-    not_condition = " OR ".join(not_conditions)
+def format_field(field_values):
+    """
+    Format field values based on whether they are single or multiple.
 
-    # Combine conditions into a Splunk search query
-    splunk_search = (
-        f"`sysmon` AND (" + selection_condition + ")"
-    )
-    if not_condition:
-        splunk_search += f" AND NOT ({not_condition})"
+    :param field_values: A list of field values.
+    :return: Formatted string for single or mvappend for multiple.
+    """
+    if len(field_values) > 1:
+        return f'mvappend("{'","'.join(field_values)}")'
+    elif field_values:
+        return f'"{field_values[0]}"'
+    return '""'  # Return empty string if no values
 
-    return splunk_search
+def extract_fields_from_sigma(sigma_file):
+    """Extract fields from a Sigma YAML file."""
+    try:
+        with open(sigma_file, 'r') as f:
+            sigma_data = yaml.safe_load(f)
 
-def parse_sigma_to_splunk(sigma_file, output_directory, mitre_code):
-    """Convert a Sigma rule to a Splunk query and save it as a .txt alert."""
-    # Ensure the output directory exists
+            # Extract description and tags
+            description = sigma_data.get('description', 'No description available')
+            tags = sigma_data.get('tags', [])
+            detection = sigma_data.get('detection', {})
+            priority = sigma_data.get('level', 'medium').lower()
+
+            # Detect MITRE Technique ID from tags
+            mitre_code = None
+            mitre_subcode = None
+            for tag in tags:
+                if tag.startswith("attack.t"):
+                    parts = tag.split('attack.t')[1].split('.')
+                    mitre_code = parts[0].upper()  # Extract main technique ID
+                    if len(parts) > 1:
+                        mitre_subcode = '.'.join(parts).upper()  # Extract sub-technique ID
+                    break
+
+            if not mitre_code:
+                print(f"Warning: No MITRE Technique ID found in tags for {sigma_file}. Using default placeholder.")
+                mitre_code = "0000"
+
+            mitre_technique_id = f"T{mitre_code}"
+            mitre_subtechnique_id = f"T{mitre_subcode}" if mitre_subcode else ""  # Ensure proper format
+
+            # Fetch technique and sub-technique details
+            mitre_details = fetch_mitre_details(mitre_technique_id, mitre_subtechnique_id)
+            mitre_technique = mitre_details["technique_name"]
+            mitre_category = mitre_details["mitre_category"]
+            mitre_subtechnique = mitre_details["subtechnique_name"]
+
+            splunk_search = sigma_to_splunk_search(detection)
+
+            return {
+                "description": description,
+                "tags": tags,
+                "priority": priority,
+                "splunk_search": splunk_search,
+                "mitre_technique_id": mitre_technique_id,
+                "mitre_technique": mitre_technique,
+                "mitre_category": mitre_category,
+                "mitre_subtechnique_id": mitre_subtechnique_id,
+                "mitre_subtechnique": mitre_subtechnique,
+                "alert_link": f"https://github.com/SigmaHQ/sigma/blob/master/{os.path.basename(sigma_file)}",
+                "upload_date": datetime.now().strftime("%Y-%m-%d"),
+                "last_modify_date": datetime.now().strftime("%Y-%m-%d"),
+                "mitre_version": "v16",
+                "creator": "Cpl Iverson",
+            }
+    except Exception as e:
+        print(f"Error reading file {sigma_file}: {e}")
+        return None
+
+def create_alert_file(sigma_file, output_directory, fields):
+    """Create an alert file based on extracted fields."""
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
 
     try:
-        # Load the Sigma file
-        with open(sigma_file, 'r') as f:
-            documents = yaml.safe_load_all(f)  # Handle multiple YAML documents
-            for sigma_data in documents:
-                if sigma_data:  # Process only valid documents
-                    description = sigma_data.get('description', 'No description available')
-                    first_sentence = description.split('.')[0] if description else ''
-                    tags = sigma_data.get('tags', [])
-                    priority = sigma_data.get('level', 'medium').capitalize()
-
-                    # Extract MITRE ATT&CK details
-                    mitre_categories = []
-                    mitre_technique_id = f"T{mitre_code}"  # Use user-specified T-code
-                    mitre_technique = fetch_mitre_technique_name(mitre_technique_id)
-                    mitre_subtechnique_id = ""
-                    mitre_subtechnique = ""
-
-                    mitre_category = "_".join(mitre_categories)
-
-                    # Convert Sigma detection to Splunk search
-                    splunk_search = sigma_to_splunk_search(sigma_data)
-
-                    # Set metadata
-                    creator = "Cpl Iverson"
-                    last_modify_date = datetime.now().strftime("%Y-%m-%d")
-                    mitre_version = "v16"
-                    alert_link = sigma_file.replace(local_sigma_repo, "https://github.com/SigmaHQ/sigma/tree/master").replace(os.sep, "/")
-
-                    # Construct Splunk query
-                    splunk_query = f"""`indextime`  {splunk_search}
+        # Construct Splunk alert query
+        first_sentence = fields["description"].split('.')[0]
+        alert_content = f"""`indextime`  {fields['splunk_search']}
 | eval hash_sha256=lower(hash_sha256),
 hunting_trigger="{first_sentence}",
-mitre_category="{mitre_category}",
-mitre_technique="{mitre_technique}",
-mitre_technique_id="{mitre_technique_id}",
-mitre_subtechnique="{mitre_subtechnique}",
-mitre_subtechnique_id="{mitre_subtechnique_id}",
-apt="",
-alert_link="{alert_link}",
-creator="{creator}",
-upload_date="{last_modify_date}",
-last_modify_date="{last_modify_date}",
-mitre_version="{mitre_version}",
-priority="{priority}"
+mitre_category={format_field([fields['mitre_category']])},
+mitre_technique={format_field([fields['mitre_technique']])},
+mitre_technique_id={format_field([fields['mitre_technique_id']])},
+mitre_subtechnique={format_field([fields['mitre_subtechnique']])},
+mitre_subtechnique_id={format_field([fields['mitre_subtechnique_id']])},
+apt={format_field([])},
+alert_link="{fields['alert_link']}",
+creator="{fields['creator']}",
+upload_date="{fields['upload_date']}",
+last_modify_date="{fields['last_modify_date']}",
+mitre_version="{fields['mitre_version']}",
+priority="{fields['priority']}"
 | `process_create_whitelist`
 | eval indextime = _indextime
 | convert ctime(indextime)
@@ -157,33 +182,25 @@ priority="{priority}"
 | collect `jarvis_index`
 """
 
-                    # Create the alert file
-                    sigma_filename = os.path.basename(sigma_file).replace('.yml', '')
-                    output_filename = f"[{mitre_technique_id}] {sigma_filename}.txt"
-                    output_path = os.path.join(output_directory, output_filename)
+        # Write to alert file
+        sigma_filename = os.path.basename(sigma_file).replace('.yml', '')
+        output_filename = f"[{fields['mitre_technique_id']}] {sigma_filename}.txt"
+        output_path = os.path.join(output_directory, output_filename)
 
-                    with open(output_path, 'w') as f:
-                        f.write(splunk_query)
-
-                    print(f"Alert file created: {output_path}")
+        with open(output_path, 'w') as alert_file:
+            alert_file.write(alert_content)
+        print(f"Alert file created: {output_path}")
     except Exception as e:
-        print(f"Error processing file {sigma_file}: {e}")
+        print(f"Error creating alert file for {sigma_file}: {e}")
 
-# Main logic
 if __name__ == "__main__":
-    github_url = "https://github.com/SigmaHQ/sigma.git"
-    local_sigma_repo = "./SigmaHQ"
-    output_directory = "./SIGMAHQ_Alerts"
+    if len(sys.argv) < 2:
+        print("Usage: python3 sigmahq.py <sigma_file_path>")
+        sys.exit(1)
 
-    fetch_sigma_repo(github_url, local_sigma_repo)
+    sigma_file_path = sys.argv[1]
+    output_dir = "./SIGMAHQ_Alerts"
 
-    mitre_code = input("Enter the MITRE T-code (e.g., 1102, 1059): ").strip()
-
-    matching_files = search_sigma_files(local_sigma_repo, mitre_code)
-
-    if matching_files:
-        print(f"Found {len(matching_files)} matching Sigma files:")
-        for file in matching_files:
-            parse_sigma_to_splunk(file, output_directory, mitre_code)
-    else:
-        print(f"No Sigma files found matching T-code {mitre_code}.")
+    fields = extract_fields_from_sigma(sigma_file_path)
+    if fields:
+        create_alert_file(sigma_file_path, output_dir, fields)
