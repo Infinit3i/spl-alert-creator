@@ -173,7 +173,7 @@ priority="{priority}"
 if __name__ == "__main__":
     github_url = "https://github.com/SigmaHQ/sigma.git"
     local_sigma_repo = "./SigmaHQ"
-    output_directory = "./Sigma-T-Code-Alerts"
+    output_directory = "./SIGMAHQ_Alerts"
 
     fetch_sigma_repo(github_url, local_sigma_repo)
 
